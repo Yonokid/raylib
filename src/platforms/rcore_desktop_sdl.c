@@ -102,6 +102,7 @@ typedef struct {
     SDL_GLContext glContext;
 
     SDL_GameController *gamepad[MAX_GAMEPADS];
+    SDL_Joystick *joystick[MAX_GAMEPADS];   // Fallback for controllers that do not have SDL mappings
     SDL_JoystickID gamepadId[MAX_GAMEPADS]; // Joystick instance ids, they do not start from 0
     SDL_Cursor *cursor;
 } PlatformData;
@@ -1725,10 +1726,10 @@ void PollInputEvents(void)
                 if ((nextAvailableSlot < MAX_GAMEPADS) && !CORE.Input.Gamepad.ready[nextAvailableSlot])
                 {
                     platform.gamepad[nextAvailableSlot] = SDL_GameControllerOpen(jid);
-                    platform.gamepadId[nextAvailableSlot] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(platform.gamepad[nextAvailableSlot]));
 
                     if (platform.gamepad[nextAvailableSlot])
                     {
+                        platform.gamepadId[nextAvailableSlot] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(platform.gamepad[nextAvailableSlot]));
                         CORE.Input.Gamepad.ready[nextAvailableSlot] = true;
                         CORE.Input.Gamepad.axisCount[nextAvailableSlot] = SDL_JoystickNumAxes(SDL_GameControllerGetJoystick(platform.gamepad[nextAvailableSlot]));
                         CORE.Input.Gamepad.axisState[nextAvailableSlot][GAMEPAD_AXIS_LEFT_TRIGGER] = -1.0f;
@@ -1738,7 +1739,18 @@ void PollInputEvents(void)
                     }
                     else
                     {
-                        TRACELOG(LOG_WARNING, "PLATFORM: Unable to open game controller [ERROR: %s]", SDL_GetError());
+                        platform.joystick[nextAvailableSlot] = SDL_JoystickOpen(jid);
+                        if (platform.joystick[nextAvailableSlot])
+                        {
+                            platform.gamepadId[nextAvailableSlot] = SDL_JoystickInstanceID(platform.joystick[nextAvailableSlot]);
+                            CORE.Input.Gamepad.ready[nextAvailableSlot] = true;
+                            CORE.Input.Gamepad.axisCount[nextAvailableSlot] = SDL_JoystickNumAxes(platform.joystick[nextAvailableSlot]);
+                            memset(CORE.Input.Gamepad.name[nextAvailableSlot], 0, MAX_GAMEPAD_NAME_LENGTH);
+                            const char *joystickName = SDL_JoystickName(platform.joystick[nextAvailableSlot]);
+                            if (joystickName != NULL) strncpy(CORE.Input.Gamepad.name[nextAvailableSlot], joystickName, MAX_GAMEPAD_NAME_LENGTH - 1);
+                            else strncpy(CORE.Input.Gamepad.name[nextAvailableSlot], "noname", 6);
+                        }
+                        else TRACELOG(LOG_WARNING, "PLATFORM: Unable to open game controller [ERROR: %s]", SDL_GetError());
                     }
                 }
             } break;
@@ -1750,11 +1762,48 @@ void PollInputEvents(void)
                 {
                     if (platform.gamepadId[i] == jid)
                     {
-                        SDL_GameControllerClose(platform.gamepad[i]);
+                        if (platform.gamepad[i]) {
+                            SDL_GameControllerClose(platform.gamepad[i]);
+                        }
+                        if (platform.joystick[i]) {
+                            SDL_JoystickClose(platform.joystick[i]);
+                        }
                         CORE.Input.Gamepad.ready[i] = false;
                         memset(CORE.Input.Gamepad.name[i], 0, MAX_GAMEPAD_NAME_LENGTH);
                         platform.gamepadId[i] = -1;
                         break;
+                    }
+                }
+            } break;
+            case SDL_JOYBUTTONDOWN:
+            {
+                int button = event.jbutton.button + 1;
+                if (button > 0 && button < MAX_GAMEPAD_BUTTONS)
+                {
+                    for (int i = 0; i < MAX_GAMEPADS; i++)
+                    {
+                        if (platform.joystick[i] && platform.gamepadId[i] == event.jbutton.which)
+                        {
+                            CORE.Input.Gamepad.currentButtonState[i][button] = 1;
+                            CORE.Input.Gamepad.lastButtonPressed = button;
+                            break;
+                        }
+                    }
+                }
+            } break;
+            case SDL_JOYBUTTONUP:
+            {
+                int button = event.jbutton.button + 1;
+                if (button > 0 && button < MAX_GAMEPAD_BUTTONS)
+                {
+                    for (int i = 0; i < MAX_GAMEPADS; i++)
+                    {
+                        if (platform.joystick[i] && platform.gamepadId[i] == event.jbutton.which)
+                        {
+                            CORE.Input.Gamepad.currentButtonState[i][button] = 0;
+                            if (CORE.Input.Gamepad.lastButtonPressed == button) CORE.Input.Gamepad.lastButtonPressed = 0;
+                            break;
+                        }
                     }
                 }
             } break;
@@ -2068,6 +2117,7 @@ int InitPlatform(void)
     for (int i = 0; i < MAX_GAMEPADS; i++)
     {
         platform.gamepadId[i] = -1; // Set all gamepad initial instance ids as invalid to not conflict with instance id zero
+        platform.joystick[i] = NULL;
     }
 
     int numJoysticks = 0;
@@ -2078,10 +2128,10 @@ int InitPlatform(void)
         for (int i = 0; (i < numJoysticks) && (i < MAX_GAMEPADS); i++)
         {
             platform.gamepad[i] = SDL_GameControllerOpen(joysticks[i]);
-            platform.gamepadId[i] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(platform.gamepad[i]));
 
             if (platform.gamepad[i])
             {
+                platform.gamepadId[i] = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(platform.gamepad[i]));
                 CORE.Input.Gamepad.ready[i] = true;
                 CORE.Input.Gamepad.axisCount[i] = SDL_JoystickNumAxes(SDL_GameControllerGetJoystick(platform.gamepad[i]));
                 CORE.Input.Gamepad.axisState[i][GAMEPAD_AXIS_LEFT_TRIGGER] = -1.0f;
@@ -2089,7 +2139,20 @@ int InitPlatform(void)
                 strncpy(CORE.Input.Gamepad.name[i], SDL_GameControllerNameForIndex(i), MAX_GAMEPAD_NAME_LENGTH - 1);
                 CORE.Input.Gamepad.name[i][MAX_GAMEPAD_NAME_LENGTH - 1] = '\0';
             }
-            else TRACELOG(LOG_WARNING, "PLATFORM: Unable to open game controller [ERROR: %s]", SDL_GetError());
+            else
+            {
+                platform.joystick[i] = SDL_JoystickOpen(i);
+                if (platform.joystick[i])
+                {
+                    platform.gamepadId[i] = SDL_JoystickInstanceID(platform.joystick[i]);
+                    CORE.Input.Gamepad.ready[i] = true;
+                    CORE.Input.Gamepad.axisCount[i] = SDL_JoystickNumAxes(platform.joystick[i]);
+                    const char *joystickName = SDL_JoystickName(platform.joystick[i]);
+                    if (joystickName != NULL) strncpy(CORE.Input.Gamepad.name[i], joystickName, MAX_GAMEPAD_NAME_LENGTH - 1);
+                    CORE.Input.Gamepad.name[i][MAX_GAMEPAD_NAME_LENGTH - 1] = '\0';
+                }
+                else TRACELOG(LOG_WARNING, "PLATFORM: Unable to open game controller [ERROR: %s]", SDL_GetError());
+            }
         }
         SDL_free(joysticks);
     }
